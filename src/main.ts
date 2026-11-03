@@ -1,0 +1,121 @@
+import { Application } from "pixi.js";
+import "./style.css";
+import { SceneManager } from "./scenes/SceneManager";
+import { LobbyScene } from "./scenes/LobbyScene";
+import { RpsScene } from "./games/rps/RpsScene";
+import { OthelloScene } from "./games/othello/OthelloScene";
+import { SteppingScene } from "./games/stepping/SteppingScene";
+import { AirhockeyScene } from "./games/airhockey/AirhockeyScene";
+import { FlagScene } from "./games/flag/FlagScene";
+import { GameId } from "./common/types";
+import { LoadingOverlay } from "./ui/LoadingOverlay";
+import { NoticeBanner } from "./ui/NoticeBanner";
+import { GAME_WIDTH, GAME_HEIGHT, POP_FONT_FAMILY } from "./config";
+import { CUTE_THEME } from "./ui/CuteTheme";
+import type { GameHandoff } from "./scenes/LobbyScene";
+import { InitAds, ShowInterstitialAd } from "./ads/AdService";
+
+// 캔버스 해상도는 720x1280 으로 고정하고, 실제 화면 크기에 맞춰 CSS 로만 배율을 조정한다
+// (스마트폰마다 화면 비율이 달라도 게임 레이아웃 좌표는 항상 720x1280 기준으로 계산하면 된다).
+function FitCanvasToWindow(canvas: HTMLCanvasElement): void {
+  const scale = Math.min(window.innerWidth / GAME_WIDTH, window.innerHeight / GAME_HEIGHT);
+  canvas.style.width = `${GAME_WIDTH * scale}px`;
+  canvas.style.height = `${GAME_HEIGHT * scale}px`;
+}
+
+// Pixi Text 는 만들어질 때 캔버스에 글자를 그려두므로, 웹폰트가 로드되기 전에 만들어지면 기본 폰트로 굳어버린다.
+// 첫 씬을 만들기 전에 폰트 로드를 기다린다 — 실패해도 기본 폰트로 계속 진행한다.
+async function LoadFonts(): Promise<void> {
+  try {
+    await document.fonts.load(`24px "${POP_FONT_FAMILY}"`);
+  } catch (error) {
+    console.warn(`폰트 로드 실패: ${POP_FONT_FAMILY}`, error);
+  }
+}
+
+async function Main(): Promise<void> {
+  // 광고는 폰트 로드와 상관없으니 가장 먼저 미리 받기 시작한다.
+  InitAds();
+  await LoadFonts();
+  const app = new Application();
+  await app.init({
+    background: "#1a1a2e",
+    // 로비는 3D 캔버스가 Pixi 아래에 보여야 한다. WebGL 컨텍스트의 투명 여부는 생성할 때 정해지므로 처음부터 투명으로 만든다.
+    backgroundAlpha: 0,
+    width: GAME_WIDTH,
+    height: GAME_HEIGHT,
+    antialias: true,
+  });
+
+  const mount = document.querySelector<HTMLDivElement>("#app");
+  if (!mount) throw new Error("#app 요소를 찾을 수 없습니다.");
+  mount.appendChild(app.canvas);
+
+  // 로비 종료 ~ 게임 채널 접속 완료 사이에 씬이 바뀌어도 계속 위에 떠 있어야 하는 로딩 화면.
+  const loading_overlay = new LoadingOverlay(CUTE_THEME);
+  // 관리자 공지(SEND_NOTICE) — 로비/게임 어느 씬이든 화면 맨 위에 항상 뜰 수 있어야 한다.
+  const notice_banner = new NoticeBanner();
+  const scene_manager = new SceneManager(app, [loading_overlay, notice_banner]);
+
+  // 게임에서 로비로 돌아가면 새 로비 씬을 만든다. 새 씬은 뜨자마자 스스로 로비 소켓 접속을 시도한다.
+  // return_game: 게임에서 돌아온 경우 그 게임 — 로비 3D 섬에서 그 건물 앞에 선다(없으면 매표소 앞).
+  function GoToLobby(return_game?: GameId): void {
+    app.renderer.background.alpha = 0;
+    const lobby_scene = new LobbyScene({
+      loading_overlay,
+      notice_banner,
+      overlay_canvas: app.canvas,
+      return_game,
+      onGameRoomReady: HandleGameRoomReady,
+    });
+    scene_manager.ChangeScene(lobby_scene);
+  }
+
+  // 게임이 끝나 로비로 돌아갈 때(각 게임 씬의 GoToLobbyOnce) — 게임방 소켓을 먼저 정상 종료(CONSENTED)로 끊고,
+  // 전면 광고를 보여준 뒤 로비로 간다 (서버 docs/HANDOFF.md 2-2).
+  // 비정상 종료로 끊기면 서버가 재접속을 기다려 로비 입장 때 REJOIN_GAME 이 올 수 있으므로 반드시 leave(true) 로 끊는다.
+  // leave() 의 Promise 는 이미 끊긴 소켓이면 끝나지 않을 수 있어 기다리지 않는다.
+  async function ExitGameToLobby(room: GameHandoff["room"], game: GameId): Promise<void> {
+    try {
+      void room.leave(true);
+    } catch (error) {
+      console.warn(`게임방 나가기 실패 ${error instanceof Error ? error.message : String(error)}`);
+    }
+    await ShowInterstitialAd();
+    GoToLobby(game);
+  }
+
+  // 로비에서 매칭이 성사되어 게임 채널 접속까지 끝나면 호출된다.
+  function HandleGameRoomReady(handoff: GameHandoff): void {
+    loading_overlay.Hide();
+    app.renderer.background.alpha = 1;
+    // 게임 종류별로 씬 옵션은 같다 — 서버가 방 입장/준비/결과를 같은 규약으로 보내기 때문이다.
+    const scene_options = {
+      room: handoff.room,
+      my_userid: handoff.my_userid,
+      is_rejoin: handoff.is_rejoin,
+      notice_banner,
+      onExitToLobby: () => void ExitGameToLobby(handoff.room, handoff.game),
+    };
+    const game_scene =
+      handoff.game === GameId.OTHELLO
+        ? new OthelloScene(scene_options)
+        : handoff.game === GameId.STEPPING
+          ? new SteppingScene(scene_options)
+          : handoff.game === GameId.AIRHOCKEY
+            ? new AirhockeyScene(scene_options)
+            : handoff.game === GameId.FLAG
+              ? new FlagScene(scene_options)
+              : new RpsScene(scene_options);
+    scene_manager.ChangeScene(game_scene);
+  }
+
+  // 캔버스 배율 조정 리스너는 씬보다 먼저 등록해야 한다. HTML 오버레이(GameSelect/NicknamePopup)도 resize 때
+  // 캔버스 크기를 읽어 위치를 맞추는데, 리스너는 등록 순서대로 실행되므로 이게 나중이면 바뀌기 전 크기를 읽는다.
+  FitCanvasToWindow(app.canvas);
+  window.addEventListener("resize", () => FitCanvasToWindow(app.canvas));
+
+  GoToLobby();
+}
+
+Main();

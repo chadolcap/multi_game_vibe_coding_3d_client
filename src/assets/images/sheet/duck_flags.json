@@ -1,0 +1,195 @@
+{
+  "frames": {
+    "01_right-up_left_up.png": {
+      "frame": {
+        "x": 2,
+        "y": 2,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "02_right-stop_left_stop.png": {
+      "frame": {
+        "x": 334,
+        "y": 2,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "03_right-down_left-down.png": {
+      "frame": {
+        "x": 666,
+        "y": 2,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "04_right-up_left-down.png": {
+      "frame": {
+        "x": 2,
+        "y": 264,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "05_right-up_left-stop.png": {
+      "frame": {
+        "x": 334,
+        "y": 264,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "06_right-down_left-up.png": {
+      "frame": {
+        "x": 666,
+        "y": 264,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "07_right-down_left-stop.png": {
+      "frame": {
+        "x": 2,
+        "y": 526,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "08_right-stop_left-up.png": {
+      "frame": {
+        "x": 334,
+        "y": 526,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    },
+    "09_right-stop_left-down.png": {
+      "frame": {
+        "x": 666,
+        "y": 526,
+        "w": 330,
+        "h": 260
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 330,
+        "h": 260
+      },
+      "sourceSize": {
+        "w": 330,
+        "h": 260
+      }
+    }
+  },
+  "meta": {
+    "app": "custom",
+    "version": "1.0",
+    "image": "duck_flags.png",
+    "format": "RGBA8888",
+    "size": {
+      "w": 998,
+      "h": 788
+    },
+    "scale": "1"
+  }
+}
