@@ -259,6 +259,9 @@ export function BuildDuck(body_color = 0xffe58a): THREE.Group {
   return group;
 }
 
+// 별명표는 섬의 다른 물체(renderOrder 0)보다 나중에 그린다.
+const NAME_LABEL_RENDER_ORDER = 1000;
+
 // 머리 위 별명표 — 항상 카메라를 본다.
 export function CreateNameLabel(name: string): THREE.Sprite {
   const canvas = document.createElement("canvas");
@@ -278,8 +281,13 @@ export function CreateNameLabel(name: string): THREE.Sprite {
   }
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, alphaTest: 0.3, transparent: false }));
+  // 건물·나무·분수 뒤에 가도 별명이 가려지지 않게 깊이 검사를 끄고, 다른 물체를 다 그린 뒤 맨 마지막에 그린다.
+  // 불투명(alphaTest) 그대로라 그리는 순서가 바뀌며 깜빡이지 않는다.
+  const label = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, alphaTest: 0.3, transparent: false, depthTest: false, depthWrite: false })
+  );
   label.scale.set(4, 1, 1);
+  label.renderOrder = NAME_LABEL_RENDER_ORDER;
   return label;
 }
 
@@ -370,7 +378,7 @@ function BuildTicketBooth(root: THREE.Group, gate_arms: THREE.Group[]): void {
   // 간판은 기둥 머리보다 높게 올려 글자가 가리지 않게 한다.
   const arch = AddMesh(booth, Box(7.4, 1.5, 0.5, 0.3), COLOR.orange, 0, 7.6, 1.7);
   arch.receiveShadow = false;
-  const title = CreateSign("매표소 · 무료 입장", 7, 1.3, "#f28b3c", "#ffffff");
+  const title = CreateSign("매표소 · 무료 입장! 건물 앞으로 걸어가 보세요.", 7, 1.3, "#f28b3c", "#ffffff");
   title.position.set(0, 7.6, 2);
   booth.add(title);
 }

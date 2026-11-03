@@ -28,6 +28,8 @@ import {
   type LobbyUsersPayload,
   type LobbyUserLeavePayload,
   type LobbyMovesPayload,
+  type MotionChangePayload,
+  type MotionChangeResultPayload,
 } from "../common/types";
 
 const LOG_TAG = "[Lobby]";
@@ -61,6 +63,8 @@ export interface LobbyEventHandlers {
   onLobbyUserJoin?: (envelope: Envelope<LobbyUserInfo>) => void;
   onLobbyUserLeave?: (envelope: Envelope<LobbyUserLeavePayload>) => void;
   onLobbyMoves?: (envelope: Envelope<LobbyMovesPayload>) => void;
+  // 오리 행동 — 내 오리 것(id = 내 sessionId)도 온다.
+  onMotionChange?: (envelope: Envelope<MotionChangeResultPayload>) => void;
   onError?: (envelope: Envelope<ErrorPayload>) => void;
   // 관리자 공지(SEND_NOTICE, 같은 type 재사용) — 로비에 접속해 있는 동안 언제든 올 수 있다.
   onNotice?: (envelope: Envelope<NoticePayload>) => void;
@@ -155,6 +159,10 @@ export class LobbyConnection {
     this.room.onMessage(MessageType.LOBBY_MOVES, (envelope: Envelope<LobbyMovesPayload>) => {
       LogReceived(MessageType.LOBBY_MOVES, envelope);
       this.handlers?.onLobbyMoves?.(envelope);
+    });
+    this.room.onMessage(MessageType.MOTION_CHANGE, (envelope: Envelope<MotionChangeResultPayload>) => {
+      LogReceived(MessageType.MOTION_CHANGE, envelope);
+      this.handlers?.onMotionChange?.(envelope);
     });
     this.room.onMessage(MessageType.ERROR, (envelope: Envelope<ErrorPayload>) => {
       LogReceived(MessageType.ERROR, envelope);
@@ -265,6 +273,16 @@ export class LobbyConnection {
     }
     this.room.send(MessageType.LOBBY_MOVE, payload);
     LogSent(MessageType.LOBBY_MOVE, payload);
+  }
+
+  // 내 오리 행동 (1 앉기 / 2 일어서기 / 3 인사 / 4 점프). 응답 대신 로비 전체에 MOTION_CHANGE{id, kind} 가 온다.
+  public SendMotionChange(payload: MotionChangePayload): void {
+    if (!this.room) {
+      console.log(`${LOG_TAG} 로비 미접속 — 보내지 못함 ${JSON.stringify({ type: MessageType.MOTION_CHANGE, payload })}`);
+      return;
+    }
+    this.room.send(MessageType.MOTION_CHANGE, payload);
+    LogSent(MessageType.MOTION_CHANGE, payload);
   }
 
   // 씬이 파괴될 때 호출한다 — 콜백만 끊는다. 로비 연결은 매칭 성사 시 서버가 스스로 끊으므로 여기서 닫지 않는다.

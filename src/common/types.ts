@@ -37,7 +37,10 @@ export const MessageType = {
   LOBBY_USERS: "LOBBY_USERS", // S->C {users, color} — ENTER_LOBBY 성공 직후 한 번, 지금 로비의 다른 유저 전부 + 내 오리 색
   LOBBY_USER_JOIN: "LOBBY_USER_JOIN", // S->C LobbyUserInfo — 새 유저. 별명을 정했을 때도 같은 id 로 다시 온다
   LOBBY_USER_LEAVE: "LOBBY_USER_LEAVE", // S->C {id}
-  LOBBY_MOVES: "LOBBY_MOVES", // S->C {moves:[[id, x, z]…]} — 0.2초마다 바뀐 위치만 묶어서 온다. 내 위치도 섞여 있으니 모르는 id 는 무시한다
+  LOBBY_MOVES: "LOBBY_MOVES", // S->C {moves:[[id, x, z, name]…]} — 0.2초마다 바뀐 위치만 묶어서 온다. 내 위치도 섞여 있으니 모르는 id 는 무시한다
+  // C->S {kind} / S->C {id, kind} — 오리 행동(엑셀 lobby 26~27행). 본인 포함 로비 전체에 온다.
+  // ⚠️ S->C 는 시트의 userid 대신 id(로비 sessionId)로 온다 (서버 docs/HANDOFF.md 000, 2026-11-03).
+  MOTION_CHANGE: "MOTION_CHANGE",
   ERROR: "ERROR", // S->C
 
   // 관리자(Watcher) 채널 전용 — 로컬 엑셀 "관리자" 시트 + 서버 소스(server_ruflo/src/common/types.ts) 기준.
@@ -104,6 +107,28 @@ export interface LobbyUserInfo {
   color: number; // 오리 색 0xRRGGBB — 서버가 정해 모두에게 같은 값을 준다
   x: number;
   z: number;
+  // 지금 자세 — 1 앉음 / 2 서 있음 (서버 docs/HANDOFF.md 000, 2026-11-03 추가). 예전 서버면 없을 수 있다.
+  motion?: number;
+}
+
+// 오리 행동 종류 (MOTION_CHANGE.kind). 앉기/일어서기는 자세가 유지되고, 인사/점프는 한 번 하고 끝난다.
+export const MotionKind = {
+  SIT: 1,
+  STAND: 2,
+  GREET: 3,
+  JUMP: 4,
+} as const;
+export type MotionKind = (typeof MotionKind)[keyof typeof MotionKind];
+
+// MOTION_CHANGE (C->S). 서버는 같은 유저가 0.3초 안에 다시 보내거나 1~4 밖의 값이면 응답 없이 무시한다.
+export interface MotionChangePayload {
+  kind: MotionKind;
+}
+
+// MOTION_CHANGE (S->C). id = 로비 sessionId (내 것도 온다).
+export interface MotionChangeResultPayload {
+  id: string;
+  kind: MotionKind;
 }
 
 export interface LobbyUsersPayload {
@@ -115,8 +140,10 @@ export interface LobbyUserLeavePayload {
   id: string;
 }
 
+// 2026-11-03 서버 변경(server/docs/HANDOFF.md 00): 각 항목 끝에 name 이 붙었다. "" = 아직 별명을 정하기 전.
+// 움직인 오리만 오므로 가만히 있는 오리의 이름은 LOBBY_USERS / LOBBY_USER_JOIN 으로 그린다.
 export interface LobbyMovesPayload {
-  moves: [id: string, x: number, z: number][];
+  moves: [id: string, x: number, z: number, name: string][];
 }
 
 // AD_VIEW_COMPLETE 응답 (S->C, 같은 type 재사용). 서버 원본: server_ruflo/src/common/types.ts AdViewCompleteResultPayload

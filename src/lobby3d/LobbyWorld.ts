@@ -5,7 +5,7 @@
 //    z-index 로만 아래에 깐다.
 import * as THREE from "three";
 import { GAME_HEIGHT, GAME_WIDTH } from "../config";
-import type { GameId, LobbyUserInfo } from "../common/types";
+import { MotionKind, type GameId, type LobbyUserInfo } from "../common/types";
 import { BuildDuck, BuildIslandOne, ClearIslandMaterialCache, CreateNameLabel, type IslandOneModel } from "./IslandOne";
 import { LOBBY_PLACES, PLAYER_START, TICKET_GATE, WALK_RADIUS, type LobbyPlace } from "./lobbyPlaces";
 
@@ -41,17 +41,67 @@ const REMOTE_WALK_SPEED = WALK_SPEED * 1.25;
 const REMOTE_SNAP_DISTANCE = 15;
 const NAME_LABEL_Y = 2.9;
 
-// 오리 모델 + 걷는 동작. 내 오리와 다른 유저 오리가 함께 쓴다.
+// 오리 행동(MOTION_CHANGE) 연출 값
+const SIT_DROP = 0.3; // 앉으면 몸이 내려가는 높이 (발은 땅에 남아 앞으로 나온다)
+const SIT_FEET_FORWARD = 0.38;
+const SIT_SPEED = 8; // 앉고 일어서는 빠르기
+const GREET_SEC = 1.2; // 오른쪽 날개를 들어 흔드는 시간
+const GREET_WAVE_SPEED = 14;
+const GREET_WING_LIFT = 0.35;
+const JUMP_SEC = 0.6;
+const JUMP_HEIGHT = 1.3;
+// 날개·발의 원래 자리 (IslandOne BuildDuck 과 같아야 한다)
+const WING_BASE_Y = 0.9;
+const FOOT_BASE_Y = 0.1;
+const FOOT_BASE_Z = 0.12;
+// 행동 버튼을 띄울 기준 높이 — 별명표(NAME_LABEL_Y) 바로 위
+const PLAYER_HEAD_Y = NAME_LABEL_Y + 0.6;
+
+// 오리 모델 + 걷는 동작 + 행동(앉기/일어서기/인사/점프). 내 오리와 다른 유저 오리가 함께 쓴다.
 class DuckActor {
   public readonly group: THREE.Group;
   private readonly wings: THREE.Object3D[];
   private readonly feet: THREE.Object3D[];
   private walk_time = 0;
+  // 앉아 있는지 (자세가 유지된다) + 앉은 정도 0~1 (부드럽게 바뀐다)
+  private is_sitting = false;
+  private sit_amount = 0;
+  // 한 번 하고 끝나는 행동(인사/점프)과 시작 후 흐른 시간
+  private action: MotionKind | null = null;
+  private action_time = 0;
 
   constructor(group: THREE.Group) {
     this.group = group;
     this.wings = ["wing_left", "wing_right"].map((name) => group.getObjectByName(name)!);
     this.feet = ["foot_left", "foot_right"].map((name) => group.getObjectByName(name)!);
+  }
+
+  public get sitting(): boolean {
+    return this.is_sitting;
+  }
+
+  // 행동 재생. 앉기/일어서기는 자세만 바꾸고, 인사/점프는 처음부터 다시 한다.
+  public PlayMotion(kind: MotionKind): void {
+    if (kind === MotionKind.SIT) this.is_sitting = true;
+    else if (kind === MotionKind.STAND) this.is_sitting = false;
+    else {
+      this.action = kind;
+      this.action_time = 0;
+    }
+  }
+
+  // 처음 자세(LOBBY_USERS·LOBBY_USER_JOIN 의 motion) — 연출 없이 바로 그 자세로 둔다.
+  public SetSittingImmediately(is_sitting: boolean): void {
+    this.is_sitting = is_sitting;
+    this.sit_amount = is_sitting ? 1 : 0;
+  }
+
+  // 다른 오리 모델로 바꿔 끼울 때(색 변경) 지금 자세와 하던 행동을 이어받는다.
+  public CopyMotionFrom(other: DuckActor): void {
+    this.is_sitting = other.is_sitting;
+    this.sit_amount = other.sit_amount;
+    this.action = other.action;
+    this.action_time = other.action_time;
   }
 
   public FaceDirection(dx: number, dz: number, delta: number): void {
@@ -62,14 +112,39 @@ class DuckActor {
   }
 
   public Animate(is_walking: boolean, delta: number, elapsed: number): void {
+    // 앉은 오리가 걸으면 일어선다 (서버도 걸으면 서 있는 것으로 바꾼다 — 따로 메시지는 없다)
+    if (is_walking) this.is_sitting = false;
+    this.sit_amount += ((this.is_sitting ? 1 : 0) - this.sit_amount) * Math.min(SIT_SPEED * delta, 1);
+    const sit = this.sit_amount;
+
+    // 인사(날개 흔들기 세기 0~1) / 점프(뜬 높이)
+    let wave = 0;
+    let hop = 0;
+    if (this.action !== null) {
+      this.action_time += delta;
+      const duration = this.action === MotionKind.GREET ? GREET_SEC : JUMP_SEC;
+      const t = this.action_time / duration;
+      if (t >= 1) this.action = null;
+      else if (this.action === MotionKind.GREET) wave = Math.sin(t * Math.PI);
+      else hop = 4 * JUMP_HEIGHT * t * (1 - t);
+    }
+
     if (is_walking) this.walk_time += delta * 11;
     const swing = is_walking ? Math.sin(this.walk_time) : 0;
     this.group.rotation.z = swing * 0.11;
-    this.group.position.y = is_walking ? Math.abs(swing) * 0.16 : Math.max(0, Math.sin(elapsed * 2.6) * 0.035);
-    this.feet[0].position.z = 0.12 + swing * 0.3;
-    this.feet[1].position.z = 0.12 - swing * 0.3;
-    this.wings[0].rotation.z = 0.15 + Math.abs(swing) * 0.35;
-    this.wings[1].rotation.z = -0.15 - Math.abs(swing) * 0.35;
+    const idle_bob = Math.max(0, Math.sin(elapsed * 2.6) * 0.035) * (1 - sit);
+    this.group.position.y = (is_walking ? Math.abs(swing) * 0.16 : idle_bob) - sit * SIT_DROP + hop;
+    // 앉으면 몸만 내려가고 발은 땅에 붙은 채 앞으로 나온다. 점프 중에는 발을 살짝 접는다.
+    const feet_y = FOOT_BASE_Y + sit * SIT_DROP + (hop > 0 ? 0.12 : 0);
+    this.feet[0].position.set(this.feet[0].position.x, feet_y, FOOT_BASE_Z + sit * SIT_FEET_FORWARD + swing * 0.3);
+    this.feet[1].position.set(this.feet[1].position.x, feet_y, FOOT_BASE_Z + sit * SIT_FEET_FORWARD - swing * 0.3);
+    // 점프 중에는 양 날개를 펄럭인다
+    const flap = hop > 0 ? 0.6 : 0;
+    this.wings[0].rotation.z = 0.15 + Math.abs(swing) * 0.35 + flap;
+    // 인사 = 오른쪽 날개를 들어 흔든다
+    const wave_swing = Math.sin(this.action_time * GREET_WAVE_SPEED) * 0.35;
+    this.wings[1].rotation.z = -0.15 - Math.abs(swing) * 0.35 - flap - wave * (1.6 + wave_swing);
+    this.wings[1].position.y = WING_BASE_Y + wave * GREET_WING_LIFT;
   }
 }
 
@@ -104,8 +179,11 @@ export class LobbyWorld {
   // 색은 서버가 LOBBY_USERS 로 알려 주면 SetPlayerColor 가 바꾼다 (그 전에는 기본 노랑)
   private player = BuildDuck();
   private player_actor: DuckActor;
+  // 내 오리 머리 위 별명 — SetPlayerName 이 붙인다 (별명을 받기 전에는 없다)
+  private player_label: THREE.Sprite | null = null;
   private readonly remote_players = new Map<string, RemotePlayer>();
   private readonly timer = new THREE.Clock();
+  private readonly raycaster = new THREE.Raycaster();
   private readonly resize = () => this.SyncCanvasSize();
   private readonly options: LobbyWorldOptions;
 
@@ -200,6 +278,9 @@ export class LobbyWorld {
     }
     remote.target_x = user.x;
     remote.target_z = user.z;
+    if (user.motion !== undefined) {
+      remote.actor.PlayMotion(user.motion === MotionKind.SIT ? MotionKind.SIT : MotionKind.STAND);
+    }
     if (remote.name !== user.name) {
       remote.name = user.name;
       this.ReplaceRemoteLabel(remote);
@@ -218,11 +299,16 @@ export class LobbyWorld {
   }
 
   // 내 위치도 함께 오지만 목록에 없어 여기서 걸러진다.
-  public MoveRemoteUser(id: string, x: number, z: number): void {
+  // name 은 LOBBY_MOVES 마다 함께 온다 — 바뀌었으면 머리 위 이름표를 다시 만든다.
+  public MoveRemoteUser(id: string, x: number, z: number, name?: string): void {
     const remote = this.remote_players.get(id);
     if (!remote) return;
     remote.target_x = x;
     remote.target_z = z;
+    if (name !== undefined && remote.name !== name) {
+      remote.name = name;
+      this.ReplaceRemoteLabel(remote);
+    }
   }
 
   // 서버가 정해 준 내 오리 색 — 다른 유저 화면에서도 이 색으로 보인다. 같은 자리에 같은 방향으로 다시 만든다.
@@ -231,11 +317,63 @@ export class LobbyWorld {
     const next = BuildDuck(color);
     next.position.copy(previous.position);
     next.rotation.copy(previous.rotation);
+    // 별명표는 새 오리로 옮겨 단다 (아래 geometry 정리에 휩쓸리지 않게 먼저 뗀다).
+    if (this.player_label) {
+      previous.remove(this.player_label);
+      next.add(this.player_label);
+    }
     this.scene.remove(previous);
     previous.traverse((object) => (object as THREE.Mesh).geometry?.dispose());
     this.scene.add(next);
     this.player = next;
+    const previous_actor = this.player_actor;
     this.player_actor = new DuckActor(next);
+    this.player_actor.CopyMotionFrom(previous_actor);
+  }
+
+  // 내 오리 행동 — 버튼을 누르면 서버 응답을 기다리지 않고 바로 재생한다.
+  public PlayPlayerMotion(kind: MotionKind): void {
+    this.player_actor.PlayMotion(kind);
+  }
+
+  public IsPlayerSitting(): boolean {
+    return this.player_actor.sitting;
+  }
+
+  // 다른 유저 오리 행동 (MOTION_CHANGE{id, kind}). 모르는 id 는 무시한다.
+  public PlayRemoteMotion(id: string, kind: MotionKind): void {
+    this.remote_players.get(id)?.actor.PlayMotion(kind);
+  }
+
+  // 화면 좌표(720x1280 기준)를 누른 곳에 내 오리가 있는지 — 3D 캔버스는 Pixi 캔버스와 같은 크기·비율이다.
+  public HitTestPlayer(x: number, y: number): boolean {
+    const pointer = new THREE.Vector2((x / GAME_WIDTH) * 2 - 1, -(y / GAME_HEIGHT) * 2 + 1);
+    this.raycaster.setFromCamera(pointer, this.camera);
+    // 별명표(스프라이트)는 빼고 오리 몸만 맞춘다
+    const meshes: THREE.Object3D[] = [];
+    this.player.traverse((object) => {
+      if ((object as THREE.Mesh).isMesh) meshes.push(object);
+    });
+    return this.raycaster.intersectObjects(meshes, false).length > 0;
+  }
+
+  // 내 오리 머리 꼭대기의 화면 좌표(720x1280 기준) — 행동 버튼을 그 위에 띄운다.
+  public GetPlayerHeadScreenPosition(): { x: number; y: number } {
+    const head = new THREE.Vector3(this.player.position.x, PLAYER_HEAD_Y, this.player.position.z).project(this.camera);
+    return { x: ((head.x + 1) / 2) * GAME_WIDTH, y: ((1 - head.y) / 2) * GAME_HEIGHT };
+  }
+
+  // 내 별명 — 다른 유저 오리처럼 머리 위에 띄운다. 별명이 바뀌면 새로 만든다.
+  public SetPlayerName(name: string): void {
+    if (this.player_label) {
+      this.player.remove(this.player_label);
+      this.player_label.material.map?.dispose();
+      this.player_label.material.dispose();
+    }
+    this.player_label = CreateNameLabel(name);
+    this.player_label.position.y = NAME_LABEL_Y;
+    this.player_label.visible = name !== "";
+    this.player.add(this.player_label);
   }
 
   private AddRemotePlayer(user: LobbyUserInfo): void {
@@ -246,13 +384,17 @@ export class LobbyWorld {
     this.scene.add(group);
     const remote: RemotePlayer = {
       actor: new DuckActor(group),
-      label: CreateNameLabel(user.name || "오리"),
+      label: CreateNameLabel(user.name),
       name: user.name,
       color: user.color,
       target_x: user.x,
       target_z: user.z,
     };
+    // 이미 앉아 있던 오리는 motion:1 로 온다 (HANDOFF 000)
+    remote.actor.SetSittingImmediately(user.motion === MotionKind.SIT);
     remote.label.position.y = NAME_LABEL_Y;
+    // 별명을 정하기 전("")에는 이름표를 숨긴다 (HANDOFF 00).
+    remote.label.visible = user.name !== "";
     group.add(remote.label);
     this.remote_players.set(user.id, remote);
   }
@@ -262,8 +404,9 @@ export class LobbyWorld {
     group.remove(remote.label);
     remote.label.material.map?.dispose();
     remote.label.material.dispose();
-    remote.label = CreateNameLabel(remote.name || "오리");
+    remote.label = CreateNameLabel(remote.name);
     remote.label.position.y = NAME_LABEL_Y;
+    remote.label.visible = remote.name !== "";
     group.add(remote.label);
   }
 

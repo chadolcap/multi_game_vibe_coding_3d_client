@@ -10,6 +10,8 @@ import type { Scene } from "./Scene";
 import { Button } from "../ui/Button";
 import { NicknamePopup } from "../ui/NicknamePopup";
 import { VirtualJoystick } from "../ui/VirtualJoystick";
+import { DuckMascot } from "../ui/DuckMascot";
+import { DuckMotionMenu } from "../ui/DuckMotionMenu";
 import { InfoPopup, STAR_SHORTAGE_MESSAGE, STAR_SHORTAGE_TITLE } from "../ui/InfoPopup";
 import { ConnectionLostPopup } from "../ui/ConnectionLostPopup";
 import { GameSelect, GetGameLabel, SELECT_WIDTH } from "../ui/GameSelect";
@@ -34,6 +36,7 @@ import {
   type RejoinGamePayload,
   type RankEntry,
   type MyRankInfo,
+  type MotionKind,
 } from "../common/types";
 
 // 통신 규약 문서(계속 갱신됨, 항상 최신 내용을 다시 확인할 것):
@@ -81,6 +84,8 @@ const LOG_TAG = "[Lobby]";
 const MENU_CARD_WIDTH = 540;
 const MENU_CARD_Y = 520;
 const MENU_CARD_HEIGHT = 460;
+// 2D 로비(3D 를 못 쓰거나 ?world=n)에서 메뉴 카드 위에 서 있는 오리 — 발 가운데가 기준점이다.
+const DUCK_FEET_Y = 500;
 // 입장/매칭 취소 버튼과 상태 문구는 화면 위쪽(star 줄 아래)에 둔다 — 아래쪽은 조이스틱과 시점 회전에 쓴다.
 const STATUS_Y = 210;
 const GATE_PASSED_MESSAGE = "무료 입장! 건물 앞으로 걸어가 보세요.";
@@ -112,6 +117,10 @@ const STAR_ROW_X = 24;
 const STAR_ROW_Y = 16;
 const STAR_ROW_HEIGHT = 60;
 const AD_BUTTON_X = STAR_ROW_X + 130;
+// 이만큼(720x1280 기준 px) 안에서 누르고 뗀 것만 '누르기'로 본다 — 더 끌면 시점 회전이다.
+const TAP_SLOP = 14;
+// 서버는 같은 유저가 0.3초 안에 다시 보낸 MOTION_CHANGE 를 조용히 무시하므로 버튼도 그 안에는 받지 않는다.
+const MOTION_COOLDOWN_MS = 300;
 // star 획득 연출(+1)이 위로 떠오르며 사라지는 시간과 거리.
 const STAR_GAIN_EFFECT_MS = 1000;
 const STAR_GAIN_EFFECT_RISE = 40;
@@ -173,6 +182,15 @@ export class LobbyScene implements Scene {
   private joystick_pointer: number | null = null;
   private readonly camera_pointers = new Map<number, { x: number; y: number }>();
   private pinch_distance: number | null = null;
+  // 아직 TAP_SLOP 보다 덜 움직인 손가락의 누른 자리 — 떼면 '누르기'(내 오리 선택)로 본다
+  private readonly tap_starts = new Map<number, { x: number; y: number }>();
+  // 내 오리를 누르면 머리 위에 뜨는 행동 버튼 (3D 로비 전용)
+  private readonly motion_menu = new DuckMotionMenu((kind) => this.OnSelectMotion(kind));
+  private last_motion_time = -Infinity;
+  // 행동 버튼이 오리를 따라다니도록 매 프레임 위치를 맞춘다
+  private readonly motion_menu_tick = () => this.UpdateMotionMenuPosition();
+  // 로비 room 의 sessionId — MOTION_CHANGE 로 돌아온 내 행동을 가려낸다
+  private my_session_id = "";
   private readonly wheel = (event: WheelEvent) => this.OnWheel(event);
   // PC 방향키·WASD 로 누르고 있는 키
   private readonly pressed_move_keys = new Set<string>();
@@ -191,10 +209,14 @@ export class LobbyScene implements Scene {
   private is_main_ui_shown = false;
   private is_menu_open = false;
   private is_matching = false;
+  // 마지막으로 NAME 으로 보낸 별명 — NAME_RESULT 성공 시 내 3D 오리 머리 위에 띄운다.
+  private pending_name = "";
   // 마지막으로 JOIN_MATCH 를 보낸 게임
   private match_game: GameId = GameId.RPS;
   // 게임 선택 + 버튼을 올려 두는 크림색 카드.
   private readonly menu_card: Graphics;
+  // 2D 로비 전용 오리 캐릭터 — 깃발 없이 제자리에서 통통 튀기만 한다. 3D 로비에서는 붙이지 않는다.
+  private readonly duck = new DuckMascot();
   private readonly nickname_popup = new NicknamePopup(CUTE_THEME);
   private readonly info_popup = new InfoPopup(CUTE_THEME);
   // 서버가 꺼졌거나 연결이 끊겨 로비 통신이 안 될 때 — 버튼으로 로비에 다시 접속하게 유도한다.
@@ -324,6 +346,9 @@ export class LobbyScene implements Scene {
     this.ad_button.visible = false;
 
     this.CreateWorld();
+    // 로비 오리는 깃발 없이 통통 튀기만 한다. 3D 섬이 있으면 섬의 오리가 대신하므로 숨긴다.
+    this.duck.HideFlags();
+    this.duck.visible = this.world === null;
     this.world_touch_layer.hitArea = new Rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT);
     this.world_touch_layer.eventMode = "static";
     this.world_touch_layer.on("pointerdown", (event) => this.OnControlDown(event));
@@ -338,11 +363,14 @@ export class LobbyScene implements Scene {
       window.addEventListener("keydown", this.key_down);
       window.addEventListener("keyup", this.key_up);
       window.addEventListener("blur", this.window_blur);
+      Ticker.shared.add(this.motion_menu_tick);
     }
 
     this.view.addChild(
       this.world ? this.world_touch_layer : CreateCuteBackground(),
       this.joystick,
+      this.motion_menu,
+      this.duck,
       this.menu_card,
       this.status,
       this.game_select,
@@ -373,6 +401,9 @@ export class LobbyScene implements Scene {
   }
 
   private CreateWorld(): void {
+    // ?world=n 으로 접속하면 3D 섬을 만들지 않고 2D 카드 메뉴 로비로 시작한다 (WebGL 실패 때와 같은 경로).
+    // world=y 또는 생략하면 3D 로비.
+    if (GetQueryParam("world")?.toLowerCase() === "n") return;
     const mount = document.querySelector<HTMLDivElement>("#app");
     if (!mount) return;
     try {
@@ -408,6 +439,7 @@ export class LobbyScene implements Scene {
       return;
     }
     this.camera_pointers.set(event.pointerId, { x: position.x, y: position.y });
+    this.tap_starts.set(event.pointerId, { x: position.x, y: position.y });
     this.pinch_distance = null;
   }
 
@@ -421,6 +453,10 @@ export class LobbyScene implements Scene {
     const previous = this.camera_pointers.get(event.pointerId);
     if (!previous) return;
     this.camera_pointers.set(event.pointerId, { x: position.x, y: position.y });
+    const tap_start = this.tap_starts.get(event.pointerId);
+    if (tap_start && Math.hypot(position.x - tap_start.x, position.y - tap_start.y) > TAP_SLOP) {
+      this.tap_starts.delete(event.pointerId);
+    }
 
     // 한 손가락 = 회전, 두 손가락 = 확대/축소
     if (this.camera_pointers.size === 1) {
@@ -439,8 +475,38 @@ export class LobbyScene implements Scene {
       // 키를 누르고 있으면 그 방향으로 이어서 걷는다
       this.ApplyKeyboardMove();
     }
+    // 한 손가락으로 거의 움직이지 않고 뗐으면 '누르기' — 두 손가락(핀치) 중에는 보지 않는다
+    const is_tap = this.tap_starts.has(event.pointerId) && this.camera_pointers.size === 1;
+    this.tap_starts.delete(event.pointerId);
     this.camera_pointers.delete(event.pointerId);
     this.pinch_distance = null;
+    if (is_tap && this.CanControlWorld()) this.OnTapWorld(this.world_touch_layer.toLocal(event.global));
+  }
+
+  // 내 오리를 누르면 행동 버튼을 열고(다시 누르면 닫고), 다른 곳을 누르면 닫는다.
+  private OnTapWorld(position: { x: number; y: number }): void {
+    if (this.world?.HitTestPlayer(position.x, position.y)) {
+      this.motion_menu.Toggle();
+      this.UpdateMotionMenuPosition();
+      return;
+    }
+    this.motion_menu.Hide();
+  }
+
+  // 행동 버튼 — 서버 응답을 기다리지 않고 내 오리는 바로 움직이고, 돌아오는 내 MOTION_CHANGE 는 무시한다.
+  private OnSelectMotion(kind: MotionKind): void {
+    const now = performance.now();
+    if (now - this.last_motion_time < MOTION_COOLDOWN_MS) return;
+    this.last_motion_time = now;
+    this.world?.PlayPlayerMotion(kind);
+    this.connection.SendMotionChange({ kind });
+    this.motion_menu.Hide();
+  }
+
+  private UpdateMotionMenuPosition(): void {
+    if (!this.motion_menu.visible || !this.world) return;
+    const head = this.world.GetPlayerHeadScreenPosition();
+    this.motion_menu.SetAnchor(head.x, head.y);
   }
 
   private MoveJoystick(x: number, y: number): void {
@@ -455,11 +521,14 @@ export class LobbyScene implements Scene {
     this.joystick.Reset();
     this.world?.SetMoveInput(0, 0);
     this.camera_pointers.clear();
+    this.tap_starts.clear();
     this.pinch_distance = null;
   }
 
   private UpdateJoystickVisible(): void {
     this.joystick.visible = this.CanControlWorld();
+    // 메뉴·팝업이 열리는 등 섬을 조작할 수 없게 되면 행동 버튼도 닫는다
+    if (!this.CanControlWorld()) this.motion_menu.Hide();
   }
 
   // PC 방향키·WASD — 화면 조이스틱을 그 방향 끝까지 민 것과 같다. 별명 입력 칸 등에 글자를 칠 때는 무시한다.
@@ -563,6 +632,7 @@ export class LobbyScene implements Scene {
     const center_x = width / 2;
 
     this.menu_card.position.set(center_x - MENU_CARD_WIDTH / 2, MENU_CARD_Y);
+    this.duck.position.set(center_x, DUCK_FEET_Y);
 
     this.status.anchor.set(0.5, 0);
     this.status.position.set(center_x, STATUS_Y);
@@ -594,6 +664,7 @@ export class LobbyScene implements Scene {
     window.removeEventListener("keydown", this.key_down);
     window.removeEventListener("keyup", this.key_up);
     window.removeEventListener("blur", this.window_blur);
+    Ticker.shared.remove(this.motion_menu_tick);
     this.world?.Destroy();
     this.view.destroy({ children: true });
   }
@@ -625,7 +696,12 @@ export class LobbyScene implements Scene {
         onLobbyUserJoin: (envelope) => this.world?.UpsertRemoteUser(envelope.payload),
         onLobbyUserLeave: (envelope) => this.world?.RemoveRemoteUser(envelope.payload.id),
         onLobbyMoves: (envelope) => {
-          for (const [id, x, z] of envelope.payload.moves) this.world?.MoveRemoteUser(id, x, z);
+          for (const [id, x, z, name] of envelope.payload.moves) this.world?.MoveRemoteUser(id, x, z, name);
+        },
+        onMotionChange: (envelope) => {
+          // 내 행동은 버튼을 누를 때 이미 재생했다 (HANDOFF 000)
+          if (envelope.payload.id === this.my_session_id) return;
+          this.world?.PlayRemoteMotion(envelope.payload.id, envelope.payload.kind);
         },
         onJoinMatchResult: (envelope) => {
           // 성공(result:Y)은 문서상 이 type 으로 오는 것으로 되어 있지만, 실제로는 MATCH_FOUND 로 온다(비고 참고).
@@ -673,6 +749,7 @@ export class LobbyScene implements Scene {
       });
 
       console.log(`${LOG_TAG} 접속 정보 ${JSON.stringify(result)}`);
+      this.my_session_id = result.session_id;
 
       // 로비 소켓이 연결되면 버튼 없이 바로 ENTER_LOBBY 를 보낸다. 응답을 받기 전까지는 "접속 중"으로 표기한다.
       const payload = BuildEnterLobbyPayload();
@@ -729,6 +806,7 @@ export class LobbyScene implements Scene {
     this.SetStar(payload.star ?? 0);
 
     if (payload.name !== "") {
+      this.world?.SetPlayerName(payload.name ?? "");
       this.ShowMainUi();
       return;
     }
@@ -736,6 +814,8 @@ export class LobbyScene implements Scene {
     this.SetStatus("");
     this.nickname_popup.Show({
       onSubmit: (name) => {
+        // NAME 응답에는 별명이 없으므로, 성공하면 3D 오리에 띄울 수 있게 보낸 값을 기억해 둔다.
+        this.pending_name = name;
         this.connection.SendName({ name });
         console.log(`${LOG_TAG} C -> S ${JSON.stringify({ type: "NAME", payload: { name } })}`);
       },
@@ -744,6 +824,7 @@ export class LobbyScene implements Scene {
 
   private HandleNameResult(payload: NameResultPayload): void {
     if (payload.result === "Y") {
+      this.world?.SetPlayerName(this.pending_name);
       this.nickname_popup.Hide();
       this.ShowMainUi();
       return;
