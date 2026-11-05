@@ -110,6 +110,7 @@ d:\work\study\multi_game_vibe_coding\멀티게임_바이브.xlsx
 | 시작 위치 | 접속하면 매표소 앞. 게임에서 돌아오면 그 게임 건물 앞에서 건물을 보고 선다(`main.ts` `GoToLobby(game)` → `LobbySceneOptions.return_game` → `LobbyWorldOptions.return_game`). 서버는 매표소 앞으로 알고 있어서 바로 내 위치를 다시 보낸다 |
 | 흐름 | 매표소 앞 → 게이트 무료 통과 → 건물 앞에서 입장 버튼 → `JOIN_MATCH`. 가운데 분수는 게임 선택 + 내정보/랭킹 메뉴 |
 | 건물 → 게임 | `lobbyPlaces.ts` 의 `LOBBY_PLACES.action` 표 — ⚠️ **임시 배정**. 다리 2개는 2~5번 섬 전까지 공사 중으로 막혀 있다 |
+| 꼬마 바이킹 | 예전 화장실 자리(`action: {kind:"ride"}`). 근처에서 `타기` → 빈 좌석(4개)에 앉아 배와 함께 흔들린다(오리를 좌석 `Group` 의 자식으로 붙임). 흔들림은 `Date.now()` 기준이라 모든 화면이 같은 박자. 탄 동안 오른쪽 위 1/4(`EYE_VIEW_RECT`)에 오리 눈 카메라를 scissor 로 한 번 더 그리고, `내리기` 버튼은 화면 아래로 옮긴다. ⚠️ **전용 메시지가 없다** — 탄 동안 `LOBBY_MOVE` 로 **좌석 좌표**(멈춘 자세 기준)를 보내고, 다른 클라이언트는 받은 좌표가 좌석 좌표와 0.15 안이면 탄 것으로 본다(`FindVikingSeatAt`). 좌석은 충돌 반지름 안이라 걸어서는 그 좌표가 나오지 않는다. 서버에 탑승 메시지가 생기면 이 부분을 바꾼다 |
 | 다른 유저 | 내 위치를 최대 0.2초마다 `LOBBY_MOVE` 로 보낸다. `LOBBY_USERS`/`LOBBY_USER_JOIN`/`LOBBY_USER_LEAVE`/`LOBBY_MOVES` 로 다른 유저 오리를 그리고, 받은 위치 사이는 `LobbyWorld` 가 걸어서 메운다. id 는 로비 sessionId, 머리 위에 별명이 뜬다. 오리 색은 **서버가 정한다** — 내 색은 `LOBBY_USERS.color`(`SetPlayerColor`), 남의 색은 `LobbyUserInfo.color`. 그래서 내 화면의 내 오리와 남의 화면의 내 오리가 같은 색이다. 클라이언트에서 색을 정하지 말 것. 같은 로비 채널 유저만 보이며 서로 충돌하지 않는다. 위치 메시지도 다른 메시지처럼 모두 로그를 남긴다(로비 연결 전에 버려진 `LOBBY_MOVE` 포함) |
 | 정리 | `LobbyWorld.Destroy()` 가 렌더 루프·GPU 자원·WebGL 컨텍스트를 돌려준다. 게임 중에는 3D 캔버스가 없다 |
 | 깜빡임 방지 | ⚠️ 겹치는 평면은 높이를 띄운다(잔디 0 / 절벽 윗면 -0.05 / 광장 0.03 / 길 0.06). 간판·별명은 `alphaTest` 로 불투명 처리, 구름도 불투명 — 반투명은 그리는 순서가 바뀌며 깜빡인다 |

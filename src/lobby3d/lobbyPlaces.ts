@@ -10,9 +10,10 @@ export const WALK_RADIUS = 28.6;
 export const PLAYER_START = { x: 0, z: 27.2 } as const;
 export const TICKET_GATE = { x: 0, z: 22.6, half_width: 2 } as const;
 
-export type LobbyPlaceAction = { kind: "game"; game: GameId } | { kind: "info" };
+// ride = 놀이기구 타기 (꼬마 바이킹)
+export type LobbyPlaceAction = { kind: "game"; game: GameId } | { kind: "info" } | { kind: "ride" };
 
-export type LobbyPlaceKind = "statue" | "cafe_green" | "cafe_red" | "doll_shop" | "toy_shop" | "food_truck" | "restroom";
+export type LobbyPlaceKind = "statue" | "cafe_green" | "cafe_red" | "doll_shop" | "toy_shop" | "food_truck" | "viking";
 
 export interface LobbyPlace {
   id: string;
@@ -33,7 +34,8 @@ export const LOBBY_PLACES: LobbyPlace[] = [
   { id: "doll_shop", label: "인형 굿즈샵", kind: "doll_shop", x: -18.2, z: -8.6, collide_radius: 4.8, action: { kind: "game", game: GameId.AIRHOCKEY } },
   { id: "toy_shop", label: "장난감 굿즈샵", kind: "toy_shop", x: -18.7, z: 7.8, collide_radius: 4.8, action: { kind: "game", game: GameId.STEPPING } },
   { id: "food_truck", label: "솜사탕 푸드트럭", kind: "food_truck", x: -5.1, z: -21.4, collide_radius: 3.6, action: { kind: "game", game: GameId.FLAG } },
-  { id: "restroom", label: "화장실", kind: "restroom", x: 12.3, z: -19.3, collide_radius: 2.6 },
+  // 예전 화장실 자리. 배가 흔들리는 폭이 커서 다리 입구(16.8, -19.7)와 겹치지 않게 조금 옮겼다.
+  { id: "viking", label: "꼬마 바이킹", kind: "viking", x: 10.2, z: -20.6, collide_radius: 5, action: { kind: "ride" } },
 ];
 
 // 다리 2개 — 2~5번 섬이 생기기 전까지는 공사 중으로 막아 둔다.

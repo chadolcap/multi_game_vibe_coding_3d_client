@@ -6,7 +6,14 @@
 import * as THREE from "three";
 import { GAME_HEIGHT, GAME_WIDTH } from "../config";
 import { MotionKind, type GameId, type LobbyUserInfo } from "../common/types";
-import { BuildDuck, BuildIslandOne, ClearIslandMaterialCache, CreateNameLabel, type IslandOneModel } from "./IslandOne";
+import {
+  BuildDuck,
+  BuildIslandOne,
+  ClearIslandMaterialCache,
+  CreateNameLabel,
+  UpdateFountainJet,
+  type IslandOneModel,
+} from "./IslandOne";
 import { LOBBY_PLACES, PLAYER_START, TICKET_GATE, WALK_RADIUS, type LobbyPlace } from "./lobbyPlaces";
 
 const SKY_COLOR = 0xbfeeff;
@@ -56,6 +63,18 @@ const FOOT_BASE_Y = 0.1;
 const FOOT_BASE_Z = 0.12;
 // 행동 버튼을 띄울 기준 높이 — 별명표(NAME_LABEL_Y) 바로 위
 const PLAYER_HEAD_Y = NAME_LABEL_Y + 0.6;
+
+// 꼬마 바이킹 — 흔들림은 벽시계(Date.now) 기준이라 모든 유저 화면에서 거의 같은 박자로 흔들린다.
+const VIKING_SWING_ANGLE = 0.5; // 좌우 최대 기울기(라디안)
+const VIKING_SWING_PERIOD_MS = 4200; // 한 번 왔다 갔다 하는 시간
+// 받은 위치가 좌석 자리(viking_seat_points)와 이만큼 가까우면 탄 것으로 본다.
+// 바이킹 안쪽 전체로 보면 예전 화장실 앞에 서 있던 유저(옛 클라이언트)까지 탄 것으로 잘못 보인다.
+const VIKING_SEAT_MATCH_DISTANCE = 0.15;
+// 오리 눈 위치(오리 기준, 앞 = +z). 부리(z 0.74)보다 조금 앞·위라 화면 아래에 부리 끝이 살짝 보인다.
+const EYE_OFFSET = new THREE.Vector3(0, 1.85, 0.8);
+const EYE_FOV = 80;
+// 오리 눈 화면 — 화면 오른쪽 위 1/4(360x640) 안쪽. LobbyScene 이 같은 자리에 테두리를 그린다.
+export const EYE_VIEW_RECT = { x: 372, y: 12, width: 336, height: 616 } as const;
 
 // 오리 모델 + 걷는 동작 + 행동(앉기/일어서기/인사/점프). 내 오리와 다른 유저 오리가 함께 쓴다.
 class DuckActor {
@@ -155,6 +174,8 @@ interface RemotePlayer {
   color: number;
   target_x: number;
   target_z: number;
+  // 바이킹 좌석 번호 — 타고 있지 않으면 null
+  seat: number | null;
 }
 
 
@@ -202,6 +223,14 @@ export class LobbyWorld {
   private last_report_time = 0;
   // 마지막으로 서버에 알린 위치. null 이면 다음 프레임에 지금 위치를 다시 알린다.
   private reported_position: { x: number; z: number } | null = { x: PLAYER_START.x, z: PLAYER_START.z };
+  // 내가 탄 바이킹 좌석 번호 (안 탔으면 null)
+  private riding_seat: number | null = null;
+  // 바이킹이 멈춰 있을 때 좌석의 땅 위 좌표 — 탄 동안 서버에 이 좌표를 보내 다른 유저도 탄 것을 안다.
+  private viking_seat_points: { x: number; z: number }[] = [];
+  // 오리 눈 카메라 — 탄 동안 화면 오른쪽 위(EYE_VIEW_RECT)에 그린다.
+  private readonly eye_camera = new THREE.PerspectiveCamera(EYE_FOV, EYE_VIEW_RECT.width / EYE_VIEW_RECT.height, 0.05, 300);
+  private readonly eye_quaternion = new THREE.Quaternion();
+  private readonly eye_turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 
   constructor(mount: HTMLElement, options: LobbyWorldOptions) {
     this.options = options;
@@ -221,6 +250,15 @@ export class LobbyWorld {
 
     this.island = BuildIslandOne();
     this.scene.add(this.island.root);
+    const viking = this.island.viking;
+    if (viking) {
+      // 흔들리기 전(멈춘 자세) 좌석 위치를 재 둔다
+      this.island.root.updateMatrixWorld(true);
+      this.viking_seat_points = viking.seats.map((seat) => {
+        const point = seat.getWorldPosition(new THREE.Vector3());
+        return { x: Math.round(point.x * 100) / 100, z: Math.round(point.z * 100) / 100 };
+      });
+    }
 
     // 게임에서 돌아왔으면 그 게임 건물 앞에 서서 건물을 본다. 아니면 매표소 앞에서 섬 안쪽(화면 위)을 본다.
     const return_place = LOBBY_PLACES.find(
@@ -278,6 +316,7 @@ export class LobbyWorld {
     }
     remote.target_x = user.x;
     remote.target_z = user.z;
+    this.SyncRemoteSeat(remote);
     if (user.motion !== undefined) {
       remote.actor.PlayMotion(user.motion === MotionKind.SIT ? MotionKind.SIT : MotionKind.STAND);
     }
@@ -291,7 +330,8 @@ export class LobbyWorld {
     const remote = this.remote_players.get(id);
     if (!remote) return;
     this.remote_players.delete(id);
-    this.scene.remove(remote.actor.group);
+    // 바이킹 좌석에 붙어 있을 수 있어 부모에서 뗀다
+    remote.actor.group.removeFromParent();
     remote.label.material.map?.dispose();
     remote.label.material.dispose();
     // 재질은 섬과 함께 쓰는 캐시라 지우지 않는다.
@@ -305,6 +345,7 @@ export class LobbyWorld {
     if (!remote) return;
     remote.target_x = x;
     remote.target_z = z;
+    this.SyncRemoteSeat(remote);
     if (name !== undefined && remote.name !== name) {
       remote.name = name;
       this.ReplaceRemoteLabel(remote);
@@ -322,9 +363,11 @@ export class LobbyWorld {
       previous.remove(this.player_label);
       next.add(this.player_label);
     }
-    this.scene.remove(previous);
+    // 바이킹을 타고 있으면 좌석에 붙어 있으므로 같은 부모에 다시 단다
+    const parent = previous.parent ?? this.scene;
+    previous.removeFromParent();
     previous.traverse((object) => (object as THREE.Mesh).geometry?.dispose());
-    this.scene.add(next);
+    parent.add(next);
     this.player = next;
     const previous_actor = this.player_actor;
     this.player_actor = new DuckActor(next);
@@ -338,6 +381,91 @@ export class LobbyWorld {
 
   public IsPlayerSitting(): boolean {
     return this.player_actor.sitting;
+  }
+
+  public IsRiding(): boolean {
+    return this.riding_seat !== null;
+  }
+
+  // 바이킹 타기 — 다른 유저가 앉지 않은 자리 중 가장 가까운 곳에 앉는다. 빈자리가 없으면 false.
+  public BoardViking(): boolean {
+    const viking = this.island.viking;
+    if (!viking || this.riding_seat !== null) return false;
+    const taken = new Set([...this.remote_players.values()].map((remote) => remote.seat));
+    const { x, z } = this.player.position;
+    let best: number | null = null;
+    let best_distance = Infinity;
+    for (let index = 0; index < this.viking_seat_points.length; index++) {
+      const point = this.viking_seat_points[index];
+      const distance = Math.hypot(point.x - x, point.z - z);
+      if (!taken.has(index) && distance < best_distance) {
+        best = index;
+        best_distance = distance;
+      }
+    }
+    if (best === null) return false;
+    this.riding_seat = best;
+    this.SetMoveInput(0, 0);
+    this.AttachToSeat(this.player, viking.seats[best]);
+    this.player_actor.SetSittingImmediately(true);
+    return true;
+  }
+
+  // 바이킹에서 내리기 — 바이킹 앞(광장 쪽)에 내려 바이킹을 보고 선다.
+  public LeaveViking(): void {
+    const viking = this.island.viking;
+    if (!viking || this.riding_seat === null) return;
+    this.riding_seat = null;
+    const front = this.GetPlaceFrontPoint(viking.place);
+    this.DetachFromSeat(this.player, front.x, front.z, Math.atan2(viking.place.x - front.x, viking.place.z - front.z));
+    this.player_actor.PlayMotion(MotionKind.STAND);
+  }
+
+  // 오리를 좌석에 붙인다 — 좌석이 배와 함께 흔들리므로 오리도 같이 흔들린다.
+  private AttachToSeat(group: THREE.Group, seat: THREE.Group): void {
+    seat.add(group);
+    group.position.set(0, 0, 0);
+    group.rotation.set(0, 0, 0);
+  }
+
+  private DetachFromSeat(group: THREE.Group, x: number, z: number, facing: number): void {
+    this.scene.add(group);
+    group.position.set(x, 0, z);
+    group.rotation.set(0, facing, 0);
+  }
+
+  // 받은 위치가 좌석 자리와 (거의) 같으면 그 좌석 번호. 좌석은 바이킹 충돌 반지름 안이라 걸어서는 갈 수 없다.
+  private FindVikingSeatAt(x: number, z: number): number | null {
+    for (let index = 0; index < this.viking_seat_points.length; index++) {
+      const point = this.viking_seat_points[index];
+      if (Math.hypot(point.x - x, point.z - z) <= VIKING_SEAT_MATCH_DISTANCE) return index;
+    }
+    return null;
+  }
+
+  // 다른 유저 — 받은 위치로 바이킹을 탔는지/내렸는지 보고 좌석에 붙이거나 뗀다.
+  private SyncRemoteSeat(remote: RemotePlayer): void {
+    const viking = this.island.viking;
+    if (!viking) return;
+    const seat = this.FindVikingSeatAt(remote.target_x, remote.target_z);
+    if (seat === remote.seat) return;
+    const group = remote.actor.group;
+    if (seat !== null) {
+      this.AttachToSeat(group, viking.seats[seat]);
+      remote.actor.SetSittingImmediately(true);
+    } else if (remote.seat !== null) {
+      // 내린 자리(멈춘 자세의 좌석)에서 새 위치로 걸어간다
+      const from = this.viking_seat_points[remote.seat];
+      this.DetachFromSeat(group, from.x, from.z, Math.atan2(remote.target_x - from.x, remote.target_z - from.z));
+      remote.actor.PlayMotion(MotionKind.STAND);
+    }
+    remote.seat = seat;
+  }
+
+  // 땅 위에서 본 내 위치 — 바이킹을 탄 동안은 흔들림과 상관없이 좌석의 멈춘 자리다.
+  private GetPlayerGroundPosition(): { x: number; z: number } {
+    if (this.riding_seat !== null) return this.viking_seat_points[this.riding_seat];
+    return this.player.position;
   }
 
   // 다른 유저 오리 행동 (MOTION_CHANGE{id, kind}). 모르는 id 는 무시한다.
@@ -359,7 +487,8 @@ export class LobbyWorld {
 
   // 내 오리 머리 꼭대기의 화면 좌표(720x1280 기준) — 행동 버튼을 그 위에 띄운다.
   public GetPlayerHeadScreenPosition(): { x: number; y: number } {
-    const head = new THREE.Vector3(this.player.position.x, PLAYER_HEAD_Y, this.player.position.z).project(this.camera);
+    const ground = this.GetPlayerGroundPosition();
+    const head = new THREE.Vector3(ground.x, PLAYER_HEAD_Y, ground.z).project(this.camera);
     return { x: ((head.x + 1) / 2) * GAME_WIDTH, y: ((1 - head.y) / 2) * GAME_HEIGHT };
   }
 
@@ -389,6 +518,7 @@ export class LobbyWorld {
       color: user.color,
       target_x: user.x,
       target_z: user.z,
+      seat: null,
     };
     // 이미 앉아 있던 오리는 motion:1 로 온다 (HANDOFF 000)
     remote.actor.SetSittingImmediately(user.motion === MotionKind.SIT);
@@ -397,6 +527,8 @@ export class LobbyWorld {
     remote.label.visible = user.name !== "";
     group.add(remote.label);
     this.remote_players.set(user.id, remote);
+    // 이미 바이킹을 타고 있던 유저면 좌석에 앉힌다
+    this.SyncRemoteSeat(remote);
   }
 
   private ReplaceRemoteLabel(remote: RemotePlayer): void {
@@ -479,9 +611,39 @@ export class LobbyWorld {
     }
     this.ReportPosition();
     this.renderer.render(this.scene, this.camera);
+    if (this.riding_seat !== null) this.RenderEyeView();
+  }
+
+  // 오리 눈 화면 — 큰 화면을 그린 뒤 오른쪽 위 칸만 잘라(scissor) 오리 눈 카메라로 한 번 더 그린다.
+  private RenderEyeView(): void {
+    // 위 render 에서 오리(좌석)의 matrixWorld 가 이번 프레임 흔들림으로 갱신됐다
+    this.eye_camera.position.copy(EYE_OFFSET).applyMatrix4(this.player.matrixWorld);
+    // 카메라는 -z 를 보므로 오리 앞(+z)을 보게 반 바퀴 돌린다
+    this.player.getWorldQuaternion(this.eye_quaternion);
+    this.eye_camera.quaternion.copy(this.eye_quaternion).multiply(this.eye_turn);
+    this.eye_camera.updateMatrixWorld();
+
+    const rect = EYE_VIEW_RECT;
+    // three.js 뷰포트는 아래쪽이 0 이다 (renderer 크기 = 720x1280 디자인 좌표)
+    const bottom = GAME_HEIGHT - rect.y - rect.height;
+    this.renderer.setScissorTest(true);
+    this.renderer.setScissor(rect.x, bottom, rect.width, rect.height);
+    this.renderer.setViewport(rect.x, bottom, rect.width, rect.height);
+    // 그림자 지도는 방금 그렸으니 다시 만들지 않는다
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.render(this.scene, this.eye_camera);
+    this.renderer.shadowMap.autoUpdate = true;
+    this.renderer.setScissorTest(false);
+    this.renderer.setViewport(0, 0, GAME_WIDTH, GAME_HEIGHT);
   }
 
   private UpdatePlayer(delta: number): void {
+    // 바이킹을 탄 동안은 걷지 않고 앉아 있는다
+    if (this.riding_seat !== null) {
+      this.player_actor.PlayMotion(MotionKind.SIT);
+      this.player_actor.Animate(false, delta, this.elapsed);
+      return;
+    }
     const position = this.player.position;
     const input = this.move_input;
     const strength = Math.min(Math.hypot(input.x, input.y), 1);
@@ -507,6 +669,12 @@ export class LobbyWorld {
   // 받은 위치를 향해 걷는다. 다른 유저 충돌은 하지 않는다 — 좁은 게이트에서 서로 막히지 않게.
   private UpdateRemotePlayers(delta: number): void {
     for (const remote of this.remote_players.values()) {
+      // 바이킹 좌석에 앉은 오리는 배와 함께 흔들리기만 한다 (MOTION_CHANGE 로 일어서도 다시 앉힌다)
+      if (remote.seat !== null) {
+        remote.actor.PlayMotion(MotionKind.SIT);
+        remote.actor.Animate(false, delta, this.elapsed);
+        continue;
+      }
       const position = remote.actor.group.position;
       const to_x = remote.target_x - position.x;
       const to_z = remote.target_z - position.z;
@@ -527,7 +695,7 @@ export class LobbyWorld {
 
   private ReportPosition(): void {
     if (this.elapsed - this.last_report_time < POSITION_REPORT_SEC) return;
-    const { x, z } = this.player.position;
+    const { x, z } = this.GetPlayerGroundPosition();
     const reported = this.reported_position;
     if (reported && Math.hypot(x - reported.x, z - reported.z) < POSITION_REPORT_MIN_DISTANCE) return;
     this.last_report_time = this.elapsed;
@@ -555,7 +723,7 @@ export class LobbyWorld {
   }
 
   private UpdateGate(delta: number): void {
-    const position = this.player.position;
+    const position = this.GetPlayerGroundPosition();
     const distance = Math.hypot(position.x - TICKET_GATE.x, position.z - TICKET_GATE.z);
     const goal = distance < GATE_OPEN_DISTANCE ? 1 : 0;
     this.gate_open += (goal - this.gate_open) * Math.min(delta * 6, 1);
@@ -569,7 +737,7 @@ export class LobbyWorld {
   }
 
   private UpdateNearPlace(): void {
-    const position = this.player.position;
+    const position = this.GetPlayerGroundPosition();
     let nearest: LobbyPlace | null = null;
     let nearest_gap = PLACE_NEAR_DISTANCE;
     for (const place of LOBBY_PLACES) {
@@ -592,11 +760,16 @@ export class LobbyWorld {
       cloud.position.x += delta * 0.5;
       if (cloud.position.x > 70) cloud.position.x = -70;
     }
+    for (const jet of this.island.fountain_jets) UpdateFountainJet(jet, this.elapsed);
+    if (this.island.viking) {
+      const phase = (Date.now() % VIKING_SWING_PERIOD_MS) / VIKING_SWING_PERIOD_MS;
+      this.island.viking.pivot.rotation.z = VIKING_SWING_ANGLE * Math.sin(phase * Math.PI * 2);
+    }
   }
 
   private UpdateCamera(delta: number): void {
     // 오리 위치만 부드럽게 따라가고, 회전·확대는 바로 반영한다(손가락을 따라 바로 돌아야 어지럽지 않다).
-    const position = this.player.position;
+    const position = this.GetPlayerGroundPosition();
     const follow = Math.min(CAMERA_FOLLOW_SPEED * delta, 1);
     this.camera_focus.lerp(new THREE.Vector3(position.x, 0, position.z), follow);
 

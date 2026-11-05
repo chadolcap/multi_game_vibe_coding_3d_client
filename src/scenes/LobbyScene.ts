@@ -17,7 +17,7 @@ import { ConnectionLostPopup } from "../ui/ConnectionLostPopup";
 import { GameSelect, GetGameLabel, SELECT_WIDTH } from "../ui/GameSelect";
 import { CUTE_COLOR, CUTE_FONT_FAMILY, CUTE_THEME, CreateCuteBackground } from "../ui/CuteTheme";
 import { GAME_HEIGHT, GAME_WIDTH } from "../config";
-import { LobbyWorld } from "../lobby3d/LobbyWorld";
+import { EYE_VIEW_RECT, LobbyWorld } from "../lobby3d/LobbyWorld";
 import type { LobbyPlace } from "../lobby3d/lobbyPlaces";
 import type { LoadingOverlay } from "../ui/LoadingOverlay";
 import type { NoticeBanner } from "../ui/NoticeBanner";
@@ -92,6 +92,9 @@ const GATE_PASSED_MESSAGE = "무료 입장! 건물 앞으로 걸어가 보세요
 const PLACE_BUTTON_WIDTH = 540;
 const PLACE_BUTTON_HEIGHT = 96;
 const PLACE_BUTTON_Y = 96;
+// 바이킹을 탄 동안 '내리기' 버튼 자리 — 위쪽은 오리 눈 화면이 쓰고, 조이스틱은 숨기므로 화면 아래에 둔다.
+const RIDE_BUTTON_Y = GAME_HEIGHT - PLACE_BUTTON_HEIGHT - 64;
+const VIKING_FULL_MESSAGE = "바이킹 자리가 모두 찼어요. 잠시 후 다시 타 보세요.";
 // 왼쪽 아래 조이스틱. 판 가운데에서 JOYSTICK_TOUCH_RADIUS 안을 누르면 조이스틱, 그 밖은 시점 회전이다.
 const JOYSTICK_RADIUS = 100;
 const JOYSTICK_X = 150;
@@ -209,6 +212,10 @@ export class LobbyScene implements Scene {
   private is_main_ui_shown = false;
   private is_menu_open = false;
   private is_matching = false;
+  // 꼬마 바이킹을 타고 있는지 — 타는 동안 걷지 않고, 오른쪽 위에 오리 눈 화면을 띄운다.
+  private is_riding = false;
+  // 오리 눈 화면 테두리 + 이름표 (속 그림은 LobbyWorld 가 3D 캔버스의 같은 자리에 그린다)
+  private readonly eye_view_frame = new Container();
   // 마지막으로 NAME 으로 보낸 별명 — NAME_RESULT 성공 시 내 3D 오리 머리 위에 띄운다.
   private pending_name = "";
   // 마지막으로 JOIN_MATCH 를 보낸 게임
@@ -355,6 +362,7 @@ export class LobbyScene implements Scene {
     this.world_touch_layer.on("globalpointermove", (event) => this.OnControlMove(event));
     this.world_touch_layer.on("pointerup", (event) => this.OnControlUp(event));
     this.world_touch_layer.on("pointerupoutside", (event) => this.OnControlUp(event));
+    this.BuildEyeViewFrame();
     this.joystick.position.set(JOYSTICK_X, JOYSTICK_Y);
     this.joystick.eventMode = "none"; // 입력은 아래 투명 판이 받는다
     this.joystick.visible = false;
@@ -368,6 +376,7 @@ export class LobbyScene implements Scene {
 
     this.view.addChild(
       this.world ? this.world_touch_layer : CreateCuteBackground(),
+      this.eye_view_frame,
       this.joystick,
       this.motion_menu,
       this.duck,
@@ -433,7 +442,8 @@ export class LobbyScene implements Scene {
     if (!this.CanControlWorld()) return;
     const position = this.world_touch_layer.toLocal(event.global);
     const from_joystick = Math.hypot(position.x - JOYSTICK_X, position.y - JOYSTICK_Y);
-    if (this.joystick_pointer === null && from_joystick <= JOYSTICK_TOUCH_RADIUS) {
+    // 바이킹을 탄 동안은 조이스틱이 없으니 어디를 끌어도 시점 회전이다
+    if (!this.is_riding && this.joystick_pointer === null && from_joystick <= JOYSTICK_TOUCH_RADIUS) {
       this.joystick_pointer = event.pointerId;
       this.MoveJoystick(position.x, position.y);
       return;
@@ -485,7 +495,8 @@ export class LobbyScene implements Scene {
 
   // 내 오리를 누르면 행동 버튼을 열고(다시 누르면 닫고), 다른 곳을 누르면 닫는다.
   private OnTapWorld(position: { x: number; y: number }): void {
-    if (this.world?.HitTestPlayer(position.x, position.y)) {
+    // 바이킹 좌석에서는 행동(앉기/점프 등)을 하지 않는다
+    if (!this.is_riding && this.world?.HitTestPlayer(position.x, position.y)) {
       this.motion_menu.Toggle();
       this.UpdateMotionMenuPosition();
       return;
@@ -526,7 +537,7 @@ export class LobbyScene implements Scene {
   }
 
   private UpdateJoystickVisible(): void {
-    this.joystick.visible = this.CanControlWorld();
+    this.joystick.visible = this.CanControlWorld() && !this.is_riding;
     // 메뉴·팝업이 열리는 등 섬을 조작할 수 없게 되면 행동 버튼도 닫는다
     if (!this.CanControlWorld()) this.motion_menu.Hide();
   }
@@ -574,21 +585,84 @@ export class LobbyScene implements Scene {
   // 오리 근처에 입장할 곳이 있고 다른 일을 하는 중이 아닐 때만 입장 버튼을 보여준다.
   private UpdatePlaceButton(): void {
     const place = this.near_place;
-    this.place_button.visible = this.is_main_ui_shown && !this.is_menu_open && !this.is_matching && place !== null;
+    this.place_button.visible =
+      this.is_main_ui_shown && !this.is_menu_open && !this.is_matching && (place !== null || this.is_riding);
+    this.place_button.y = this.is_riding ? RIDE_BUTTON_Y : PLACE_BUTTON_Y;
+    if (this.is_riding) {
+      this.place_button.SetLabel("바이킹에서 내리기");
+      return;
+    }
     if (!place?.action) return;
+    const action = place.action;
     this.place_button.SetLabel(
-      place.action.kind === "game" ? `${place.label} · ${GetGameLabel(place.action.game)} 입장` : `${place.label} · 내정보/랭킹 보기`
+      action.kind === "game"
+        ? `${place.label} · ${GetGameLabel(action.game)} 입장`
+        : action.kind === "ride"
+          ? `${place.label} · 타기`
+          : `${place.label} · 내정보/랭킹 보기`
     );
   }
 
   private OnClickPlace(): void {
+    if (this.is_riding) {
+      this.SetRiding(false);
+      return;
+    }
     const action = this.near_place?.action;
     if (!action) return;
     if (action.kind === "game") {
       this.StartMatch(action.game);
       return;
     }
+    if (action.kind === "ride") {
+      this.SetRiding(true);
+      return;
+    }
     this.OpenMenu();
+  }
+
+  // 꼬마 바이킹 타기/내리기 — 탄 동안은 내 위치로 좌석 자리를 보내므로 다른 유저 화면에서도 탄 모습이 보인다.
+  private SetRiding(is_riding: boolean): void {
+    if (!this.world) return;
+    if (is_riding) {
+      if (!this.world.BoardViking()) {
+        this.SetStatus(VIKING_FULL_MESSAGE);
+        return;
+      }
+      this.ReleaseControls();
+      this.motion_menu.Hide();
+      if (this.status.text === VIKING_FULL_MESSAGE) this.SetStatus("");
+    } else {
+      this.world.LeaveViking();
+    }
+    this.is_riding = is_riding;
+    this.eye_view_frame.visible = is_riding;
+    this.UpdateJoystickVisible();
+    this.UpdatePlaceButton();
+  }
+
+  // 오른쪽 위 오리 눈 화면의 테두리. 테두리 두께가 3D 그림의 네모난 모서리를 덮는다.
+  private BuildEyeViewFrame(): void {
+    const rect = EYE_VIEW_RECT;
+    const border = new Graphics()
+      .roundRect(rect.x, rect.y, rect.width, rect.height, 10)
+      .stroke({ color: CUTE_COLOR.shirt, width: 12 })
+      .roundRect(rect.x - 6, rect.y - 6, rect.width + 12, rect.height + 12, 16)
+      .stroke({ color: 0xffffff, width: 3 });
+    const tag = new Text({
+      text: "오리 눈으로 보기",
+      style: {
+        fill: CUTE_COLOR.brown,
+        fontSize: 22,
+        fontFamily: CUTE_FONT_FAMILY,
+        stroke: { color: 0xffffff, width: 6, join: "round" },
+      },
+    });
+    tag.anchor.set(0.5, 1);
+    tag.position.set(rect.x + rect.width / 2, rect.y + rect.height - 12);
+    this.eye_view_frame.addChild(border, tag);
+    this.eye_view_frame.eventMode = "none"; // 터치는 아래 투명 판이 받아 시점을 돌린다
+    this.eye_view_frame.visible = false;
   }
 
   // 분수 메뉴 — 게임을 골라 내 전적과 랭킹을 본다. 게임 입장은 건물에서 한다(3D 를 못 쓰면 여기서 입장한다).
@@ -642,7 +716,7 @@ export class LobbyScene implements Scene {
     this.my_info_button.position.set(center_x - this.my_info_button.width / 2, MENU_CARD_Y + 136);
     this.join_match_button.position.set(center_x - this.join_match_button.width / 2, MENU_CARD_Y + 246);
     this.close_menu_button.position.set(center_x - this.close_menu_button.width / 2, MENU_CARD_Y + 246);
-    this.place_button.position.set(center_x - PLACE_BUTTON_WIDTH / 2, PLACE_BUTTON_Y);
+    this.place_button.position.set(center_x - PLACE_BUTTON_WIDTH / 2, this.is_riding ? RIDE_BUTTON_Y : PLACE_BUTTON_Y);
     this.cancel_match_button.position.set(center_x - this.cancel_match_button.width / 2, PLACE_BUTTON_Y);
 
     const rank_gap = 20;

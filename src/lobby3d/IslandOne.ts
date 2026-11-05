@@ -25,6 +25,10 @@ export interface IslandOneModel {
   gate_arms: THREE.Group[];
   water: THREE.Mesh;
   clouds: THREE.Group[];
+  // 분수 오리 부리에서 나오는 물줄기 (매 프레임 UpdateFountainJet)
+  fountain_jets: FountainJet[];
+  // 꼬마 바이킹 (배치표에 없으면 null)
+  viking: VikingModel | null;
   obstacles: WorldObstacle[];
 }
 
@@ -211,14 +215,177 @@ function BuildFoodTruck(label: string): THREE.Group {
   return group;
 }
 
-function BuildRestroom(label: string): THREE.Group {
-  const group = BuildRoundHouse(label, 0xe7f3f7, COLOR.blue, 2.3, "#5aa9d6");
-  group.scale.setScalar(0.92);
-  return group;
+// 꼬마 바이킹 — 앞(+z)이 광장을 본다. 배는 길이 방향(x)으로 그네처럼 흔들린다(pivot.rotation.z).
+// 좌석은 배 양쪽 끝에서 가운데를 보고 앉는 4자리다. 앉은 오리는 좌석(seat) 아래에 붙여 배와 함께 흔들린다.
+export interface VikingModel {
+  place: LobbyPlace;
+  pivot: THREE.Group;
+  seats: THREE.Group[];
+}
+
+const VIKING_AXLE_Y = 5;
+const VIKING_FRAME_Z = 1.9;
+const VIKING_FRAME_FOOT_X = 3.1;
+const VIKING_HULL_Y = -3; // 축(pivot) 기준 배 가운데 높이
+// 마주 보는 가운데 두 오리 부리와, 앞뒤 오리의 부리·등이 닿지 않는 간격이다.
+const VIKING_SEAT_X = [-2.75, -1, 1, 2.75];
+
+function BuildViking(label: string): { group: THREE.Group; pivot: THREE.Group; seats: THREE.Group[] } {
+  const group = new THREE.Group();
+  const deck = AddMesh(group, Cylinder(4.4, 4.6, 0.3, 32), COLOR.cream, 0, 0.15, 0);
+  deck.castShadow = false;
+
+  // 양쪽 A자 기둥 + 가운데 축
+  const leg_height = VIKING_AXLE_Y - 0.3;
+  const leg_length = Math.hypot(VIKING_FRAME_FOOT_X, leg_height);
+  const leg_angle = Math.atan2(VIKING_FRAME_FOOT_X, leg_height);
+  for (const z of [-VIKING_FRAME_Z, VIKING_FRAME_Z]) {
+    for (const side of [-1, 1]) {
+      const leg = AddMesh(group, Cylinder(0.16, 0.2, leg_length, 10), COLOR.blue, (side * VIKING_FRAME_FOOT_X) / 2, 0.3 + leg_height / 2, z);
+      leg.rotation.z = side * leg_angle;
+    }
+    AddMesh(group, Sphere(0.36), COLOR.yellow, 0, VIKING_AXLE_Y, z);
+  }
+  const axle = AddMesh(group, Cylinder(0.14, 0.14, VIKING_FRAME_Z * 2, 10), COLOR.yellow, 0, VIKING_AXLE_Y, 0);
+  axle.rotation.x = Math.PI / 2;
+
+  const pivot = new THREE.Group();
+  pivot.position.y = VIKING_AXLE_Y;
+  group.add(pivot);
+  // 축에서 배까지 내려오는 팔
+  for (const z of [-1.3, 1.3]) {
+    AddMesh(pivot, Box(0.26, -VIKING_HULL_Y, 0.26, 0.08), COLOR.yellow, 0, VIKING_HULL_Y / 2, z);
+  }
+  // 배 몸통 + 양 끝이 들린 뱃머리 + 위쪽 노란 띠
+  AddMesh(pivot, Box(6.4, 1, 2.3, 0.4), COLOR.red, 0, VIKING_HULL_Y, 0);
+  for (const side of [-1, 1]) {
+    const prow = AddMesh(pivot, Box(1.4, 1, 2.3, 0.4), COLOR.red, side * 3.5, VIKING_HULL_Y + 0.35, 0);
+    prow.rotation.z = side * 0.55;
+  }
+  // 노란 띠는 양옆 난간 두 줄 — 판 하나로 덮으면 갑판이 뚜껑처럼 막혀 오리 눈 화면이 노랗게 가린다.
+  for (const z of [-1.1, 1.1]) {
+    AddMesh(pivot, Box(7, 0.22, 0.22, 0.08), COLOR.yellow, 0, VIKING_HULL_Y + 0.55, z);
+  }
+  // 뱃머리 장식 — 한쪽은 동그란 용 머리, 한쪽은 꼬리
+  AddMesh(pivot, Sphere(0.5), COLOR.green, 4.15, VIKING_HULL_Y + 1.25, 0);
+  AddMesh(pivot, Sphere(0.1), 0x3a2c28, 4.45, VIKING_HULL_Y + 1.4, 0.3);
+  AddMesh(pivot, Sphere(0.1), 0x3a2c28, 4.45, VIKING_HULL_Y + 1.4, -0.3);
+  AddMesh(pivot, new THREE.ConeGeometry(0.35, 1, 10), COLOR.green, -4.15, VIKING_HULL_Y + 1.3, 0).rotation.z = 0.5;
+  // 옆면 방패 무늬
+  for (const z of [-1.18, 1.18]) {
+    for (const x of [-1.6, 0, 1.6]) {
+      const shield = AddMesh(pivot, Cylinder(0.36, 0.36, 0.08, 16), x === 0 ? COLOR.yellow : COLOR.white, x, VIKING_HULL_Y, z);
+      shield.rotation.x = Math.PI / 2;
+    }
+  }
+
+  // 좌석 — 의자 + 오리를 붙일 자리. 배 왼쪽 두 자리는 +x, 오른쪽 두 자리는 -x(배 가운데)를 본다.
+  const seats = VIKING_SEAT_X.map((x) => {
+    AddMesh(pivot, Box(0.7, 0.3, 1.6, 0.1), COLOR.wood, x, VIKING_HULL_Y + 0.2, 0);
+    const seat = new THREE.Group();
+    seat.position.set(x, VIKING_HULL_Y + 0.05, 0);
+    seat.rotation.y = x < 0 ? Math.PI / 2 : -Math.PI / 2;
+    pivot.add(seat);
+    return seat;
+  });
+
+  const sign = CreateSign(label, 4, 0.95, "#e8604c", "#ffffff");
+  sign.position.set(0, VIKING_AXLE_Y + 1.1, VIKING_FRAME_Z + 0.1);
+  group.add(sign);
+  return { group, pivot, seats };
+}
+
+// 분수 물줄기 — 동상 오리 부리에서 앞(+z)으로 포물선을 그리며 연못에 떨어진다.
+// 물방울은 InstancedMesh 하나로 그리고, LobbyWorld 가 매 프레임 UpdateFountainJet() 으로 위치만 옮긴다.
+// ⚠️ 반투명으로 두면 그리는 순서가 바뀌며 깜빡이므로 물방울·물결 모두 불투명으로 그린다.
+export interface FountainJet {
+  drops: THREE.InstancedMesh;
+  ripples: THREE.Mesh[];
+}
+
+const JET_START = { y: 6.2, z: 2.1 }; // 동상 부리 끝 (오리 scale 2.1, y 2.95 기준)
+const JET_SPEED_Y = 1.5;
+const JET_GRAVITY = 9.8;
+const POND_SURFACE_Y = 0.97;
+const JET_LAND_Z = 4.6;
+// 부리에서 수면까지 걸리는 시간: JET_START.y + vy·t - g·t²/2 = POND_SURFACE_Y
+const JET_FLIGHT_SEC =
+  (JET_SPEED_Y + Math.sqrt(JET_SPEED_Y * JET_SPEED_Y + 2 * JET_GRAVITY * (JET_START.y - POND_SURFACE_Y))) / JET_GRAVITY;
+const JET_SPEED_Z = (JET_LAND_Z - JET_START.z) / JET_FLIGHT_SEC;
+const JET_DROP_COUNT = 36;
+const SPLASH_DROP_COUNT = 10;
+const SPLASH_FLIGHT_SEC = 0.45;
+const RIPPLE_SEC = 1.4;
+const fountain_matrix = new THREE.Matrix4();
+const fountain_position = new THREE.Vector3();
+const fountain_rotation = new THREE.Quaternion();
+const fountain_scale = new THREE.Vector3();
+
+function BuildFountainJet(parent: THREE.Group): FountainJet {
+  const material = new THREE.MeshLambertMaterial({ color: 0xc8f1ff, emissive: 0x2a6f8a });
+  const drops = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 8, 6), material, JET_DROP_COUNT + SPLASH_DROP_COUNT);
+  drops.castShadow = false;
+  drops.receiveShadow = false;
+  // 물방울이 화면 밖 판정으로 사라지지 않게 한다(인스턴스 위치가 계속 바뀐다).
+  drops.frustumCulled = false;
+  parent.add(drops);
+
+  const ripples: THREE.Mesh[] = [];
+  const ripple_material = new THREE.MeshBasicMaterial({ color: 0xe6f9ff });
+  for (let i = 0; i < 2; i++) {
+    const ripple = new THREE.Mesh(new THREE.RingGeometry(0.85, 1, 32), ripple_material);
+    ripple.rotation.x = -Math.PI / 2;
+    // 연못 수면(0.97)보다 살짝 띄워 z-fighting 을 막는다.
+    ripple.position.set(0, POND_SURFACE_Y + 0.02 + i * 0.01, JET_LAND_Z);
+    parent.add(ripple);
+    ripples.push(ripple);
+  }
+  const jet = { drops, ripples };
+  UpdateFountainJet(jet, 0);
+  return jet;
+}
+
+export function UpdateFountainJet(jet: FountainJet, elapsed: number): void {
+  // 물줄기 — 같은 포물선 위에 물방울을 시간차로 흘려 보낸다.
+  for (let i = 0; i < JET_DROP_COUNT; i++) {
+    const t = ((elapsed / JET_FLIGHT_SEC + i / JET_DROP_COUNT) % 1) * JET_FLIGHT_SEC;
+    const wobble = Math.sin(i * 12.9898) * 0.06;
+    fountain_position.set(
+      wobble,
+      JET_START.y + JET_SPEED_Y * t - 0.5 * JET_GRAVITY * t * t,
+      JET_START.z + JET_SPEED_Z * t
+    );
+    // 떨어질수록 조금씩 굵어진다.
+    fountain_scale.setScalar(0.75 + (t / JET_FLIGHT_SEC) * 0.45);
+    fountain_matrix.compose(fountain_position, fountain_rotation, fountain_scale);
+    jet.drops.setMatrixAt(i, fountain_matrix);
+  }
+  // 물보라 — 떨어진 자리에서 사방으로 작게 튄다.
+  for (let i = 0; i < SPLASH_DROP_COUNT; i++) {
+    const t = ((elapsed / SPLASH_FLIGHT_SEC + (i * 0.37) % 1) % 1) * SPLASH_FLIGHT_SEC;
+    const angle = (i / SPLASH_DROP_COUNT) * Math.PI * 2;
+    const spread = 1.3 + (i % 3) * 0.35;
+    fountain_position.set(
+      Math.cos(angle) * spread * t,
+      POND_SURFACE_Y + 2.2 * t - 0.5 * JET_GRAVITY * t * t,
+      JET_LAND_Z + Math.sin(angle) * spread * t
+    );
+    fountain_scale.setScalar(Math.max(0.05, 0.55 * (1 - t / SPLASH_FLIGHT_SEC)));
+    fountain_matrix.compose(fountain_position, fountain_rotation, fountain_scale);
+    jet.drops.setMatrixAt(JET_DROP_COUNT + i, fountain_matrix);
+  }
+  jet.drops.instanceMatrix.needsUpdate = true;
+
+  // 물결 — 퍼지면서 가늘어지는 고리 2개가 번갈아 퍼진다.
+  jet.ripples.forEach((ripple, index) => {
+    const phase = (elapsed / RIPPLE_SEC + index * 0.5) % 1;
+    ripple.scale.setScalar(0.3 + phase * 1.4);
+    ripple.visible = phase < 0.9;
+  });
 }
 
 // 가운데 조형물 — 큰 분수 위에 오리 동상이 서 있다.
-function BuildDuckFountain(label: string): THREE.Group {
+function BuildDuckFountain(label: string, jets: FountainJet[]): THREE.Group {
   const group = new THREE.Group();
   AddMesh(group, Cylinder(6.1, 6.3, 0.9, 32), COLOR.stone, 0, 0.45, 0);
   const pond = AddMesh(group, Cylinder(5.5, 5.5, 0.1, 32), COLOR.water, 0, 0.92, 0);
@@ -229,6 +396,7 @@ function BuildDuckFountain(label: string): THREE.Group {
   duck.scale.setScalar(2.1);
   duck.position.y = 2.95;
   group.add(duck);
+  jets.push(BuildFountainJet(group));
   const sign = CreateSign(label, 4, 0.95, "#f28b3c", "#ffffff");
   sign.position.set(0, 1.45, 6.4);
   sign.rotation.x = -0.25;
@@ -291,10 +459,15 @@ export function CreateNameLabel(name: string): THREE.Sprite {
   return label;
 }
 
-function BuildPlaceModel(place: LobbyPlace): THREE.Group {
+function BuildPlaceModel(place: LobbyPlace, jets: FountainJet[], vikings: VikingModel[]): THREE.Group {
   switch (place.kind) {
     case "statue":
-      return BuildDuckFountain(place.label);
+      return BuildDuckFountain(place.label, jets);
+    case "viking": {
+      const viking = BuildViking(place.label);
+      vikings.push({ place, pivot: viking.pivot, seats: viking.seats });
+      return viking.group;
+    }
     case "cafe_green":
       return BuildCafe(place.label, COLOR.cream, COLOR.green, COLOR.green, "#2f8a5f");
     case "cafe_red":
@@ -305,8 +478,6 @@ function BuildPlaceModel(place: LobbyPlace): THREE.Group {
       return BuildToyShop(place.label);
     case "food_truck":
       return BuildFoodTruck(place.label);
-    case "restroom":
-      return BuildRestroom(place.label);
   }
 }
 
@@ -510,8 +681,10 @@ export function BuildIslandOne(): IslandOneModel {
   ];
 
   const water = BuildGround(root);
+  const fountain_jets: FountainJet[] = [];
+  const vikings: VikingModel[] = [];
   for (const place of LOBBY_PLACES) {
-    const group = BuildPlaceModel(place);
+    const group = BuildPlaceModel(place, fountain_jets, vikings);
     group.position.set(place.x, 0, place.z);
     // 분수를 뺀 건물은 앞면(+z)이 광장을 본다. 분수 간판은 매표소 쪽을 본다.
     if (place.kind !== "statue") group.rotation.y = Math.atan2(-place.x, -place.z);
@@ -534,5 +707,5 @@ export function BuildIslandOne(): IslandOneModel {
     return cloud;
   });
 
-  return { root, place_groups, gate_arms, water, clouds, obstacles };
+  return { root, place_groups, gate_arms, water, clouds, fountain_jets, viking: vikings[0] ?? null, obstacles };
 }
